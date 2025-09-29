@@ -1,0 +1,63 @@
+name: CI/CD – exdev-apply-api
+
+on:
+  push:
+    branches: ["master"]   # cámbialo si despliegas otra rama
+  workflow_dispatch: {}    # permite correrlo manualmente
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}         # ej: 18.231.166.7
+          username: ${{ secrets.SSH_USER }}     # ej: ubuntu o ec2-user
+          key: ${{ secrets.SSH_PRIVATE_KEY }}   # llave privada que creaste
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -e
+            if [ ! -d /opt/exdev-apply-api ]; then
+              mkdir -p /opt/exdev-apply-api
+              cd /opt/exdev-apply-api
+              git clone https://github.com/${{ github.repository }} .
+            else
+              cd /opt/exdev-apply-api
+              git fetch --all
+              git checkout -B ${{ github.ref_name }} origin/${{ github.ref_name }}
+            fi
+
+            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+            docker compose -f docker-compose.yml pull
+            docker compose -f docker-compose.yml up -d --remove-orphans
+            docker image prune -f
+
+            
+            
