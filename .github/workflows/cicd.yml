@@ -14,9 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  build-and-push:
     runs-on: ubuntu-latest
-    environment: staging
     steps:
       - uses: actions/checkout@v4
 
@@ -34,38 +33,21 @@ jobs:
           push: true
           tags: ghcr.io/exdevutem/exdev-api:latest
 
-      - name: Deploy over SSH (staging/develop)
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          script: |
-            set -e
-            APP_DIR=/opt/exdev-api
-            REPO=exdevutem/exdev-api
-            SHA=${{ github.sha }}
+  deploy-staging:
+    needs: build-and-push
+    runs-on: self-hosted
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
 
-            # Asegura permisos correctos (por si alguna vez vuelve a quedar con root)
-            sudo mkdir -p "$APP_DIR"
-            sudo chown -R $USER:$USER "$APP_DIR"
-
-            if [ ! -d "$APP_DIR/.git" ]; then
-              # Inicializa repo EN ese directorio (no se borra .env)
-              git -C "$APP_DIR" init
-              git -C "$APP_DIR" remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$REPO
-              git -C "$APP_DIR" fetch --depth=1 origin develop
-              git -C "$APP_DIR" checkout -B develop origin/develop
-            else
-              git -C "$APP_DIR" fetch --all --depth=1
-              git -C "$APP_DIR" checkout -B develop origin/develop
-            fi
-
-            # (Opcional) alinear exactamente al commit que se buildéo
-            git -C "$APP_DIR" checkout "$SHA" || true
-
-            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-            docker compose -f "$APP_DIR/docker-compose.yml" pull
-            docker compose -f "$APP_DIR/docker-compose.yml" up -d --remove-orphans
-            docker image prune -f
+      - name: Deploy locally on staging runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_DIR=/opt/exdev-api
+          mkdir -p "$APP_DIR"
+          cp docker-compose.yml "$APP_DIR/docker-compose.yml"
+          docker login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          docker compose -f "$APP_DIR/docker-compose.yml" pull
+          docker compose -f "$APP_DIR/docker-compose.yml" up -d --remove-orphans
+          docker image prune -f
