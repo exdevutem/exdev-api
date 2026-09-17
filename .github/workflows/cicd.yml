@@ -1,8 +1,8 @@
-name: CI/CD – exdev-apply-api
+name: CI/CD – exdev-api
 
 on:
   push:
-    branches: ["master"]
+    branches: ["develop"]
   workflow_dispatch: {}    # permite correrlo manualmente
 
 permissions:
@@ -16,6 +16,7 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: staging
     steps:
       - uses: actions/checkout@v4
 
@@ -31,9 +32,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/ianbattistoni/exdev-apply-api:latest  # todo en minúsculas
+          tags: ghcr.io/exdevutem/exdev-api:latest
 
-      - name: Deploy over SSH (only master)
+      - name: Deploy over SSH (staging/develop)
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -42,8 +43,8 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             set -e
-            APP_DIR=/opt/exdev-apply-api
-            REPO=IanBattistoni/exdev-apply-api
+            APP_DIR=/opt/exdev-api
+            REPO=exdevutem/exdev-api
             SHA=${{ github.sha }}
 
             # Asegura permisos correctos (por si alguna vez vuelve a quedar con root)
@@ -54,11 +55,11 @@ jobs:
               # Inicializa repo EN ese directorio (no se borra .env)
               git -C "$APP_DIR" init
               git -C "$APP_DIR" remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$REPO
-              git -C "$APP_DIR" fetch --depth=1 origin master
-              git -C "$APP_DIR" checkout -B master origin/master
+              git -C "$APP_DIR" fetch --depth=1 origin develop
+              git -C "$APP_DIR" checkout -B develop origin/develop
             else
               git -C "$APP_DIR" fetch --all --depth=1
-              git -C "$APP_DIR" checkout -B master origin/master
+              git -C "$APP_DIR" checkout -B develop origin/develop
             fi
 
             # (Opcional) alinear exactamente al commit que se buildéo

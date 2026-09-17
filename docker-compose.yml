@@ -1,13 +1,13 @@
 version: "3.9"
 
 services:
-  exdev-apply-api:
-    image: ghcr.io/ianbattistoni/exdev-apply-api:latest
-    container_name: exdev-apply-api
+  exdev-api:
+    image: ghcr.io/exdevutem/exdev-api:latest
+    container_name: exdev-api
     restart: unless-stopped
     ports:
       - "3001:3000"                      
     env_file:
-      - /opt/exdev-apply-api/.env   
+      - /opt/exdev-api/.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
