@@ -10,6 +10,7 @@ async function bootstrap() {
   expressApp.set('etag', false);
 
     const WEB_ORIGINS = [
+    'https://dev.exdev.cl',
     'https://exdev.cl',
     'https://www.exdev.cl', 
     'http://localhost:5000',
@@ -38,3 +39,4 @@ async function bootstrap() {
   await app.listen(process.env.PORT ? Number(process.env.PORT) : 3000);
 }
 bootstrap();
+
