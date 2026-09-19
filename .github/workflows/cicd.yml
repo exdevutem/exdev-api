@@ -2,8 +2,8 @@ name: CI/CD – exdev-api
 
 on:
   push:
-    branches: ["develop"]
-  workflow_dispatch: {}    # permite correrlo manualmente
+    branches: [develop, master]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -26,28 +26,63 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & Push image (:latest)
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/exdevutem/exdev-api:latest
+          tags: ghcr.io/exdevutem/exdev-api:${{ github.ref_name }}
 
   deploy-staging:
+    if: github.ref_name == 'develop'
     needs: build-and-push
-    runs-on: self-hosted
+    runs-on: [self-hosted, staging]
     environment: staging
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy locally on staging runner
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy staging
         shell: bash
         run: |
           set -euo pipefail
           APP_DIR=/opt/exdev-api
           mkdir -p "$APP_DIR"
           cp docker-compose.yml "$APP_DIR/docker-compose.yml"
-          docker login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          export IMAGE_TAG=develop
+          docker compose -f "$APP_DIR/docker-compose.yml" pull
+          docker compose -f "$APP_DIR/docker-compose.yml" up -d --remove-orphans
+          docker image prune -f
+
+  deploy-production:
+    if: github.ref_name == 'master'
+    needs: build-and-push
+    runs-on: [self-hosted, production]
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy production
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_DIR=/opt/exdev-api
+          mkdir -p "$APP_DIR"
+          cp docker-compose.yml "$APP_DIR/docker-compose.yml"
+          export IMAGE_TAG=master
           docker compose -f "$APP_DIR/docker-compose.yml" pull
           docker compose -f "$APP_DIR/docker-compose.yml" up -d --remove-orphans
           docker image prune -f
