@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  exdev-api:
+    image: ghcr.io/exdevutem/exdev-api:${IMAGE_TAG:-latest}
+    container_name: exdev-api
+    restart: unless-stopped
+    ports:
+      - "3001:3000"                      
+    env_file:
+      - /opt/exdev-api/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+

@@ -9,4 +9,8 @@ export class ApplicationsController {
         create(@Body() body: any){
             return this.applicationsService.create(body);
         }
+        @Get()
+        findAll() {
+            return this.applicationsService.findAll();
+        }
 }

@@ -69,4 +69,51 @@ async create(body: any){
     }
   }
 
+  async findAll() {
+    const countSql = `SELECT COUNT(*)::int AS total FROM postulaciones;`;
+
+    const listSql = `
+      SELECT
+        id,
+        nombre_completo,
+        rut,
+        edad,
+        correo_institucional,
+        campus,
+        carrera,
+        anio_ingreso,
+        anio_actual,
+        area_interes1,
+        area_interes2,
+        area_interes3,
+        ayudantias,
+        horas_disponibles_semanales,
+        motivo_postulacion,
+        proyecto_idea,
+        portafolio,
+        postulacion_conjunta,
+        pitch,
+        apodo,
+        created_at,
+        updated_at
+      FROM postulaciones
+      ORDER BY created_at DESC;
+    `;
+
+    try {
+      const [countRes, listRes] = await Promise.all([
+        this.pool.query(countSql),
+        this.pool.query(listSql),
+      ]);
+
+      return {
+        totalPostulaciones: countRes.rows[0].total as number,
+        postulaciones: listRes.rows,
+      };
+    } catch (err: any) {
+      const { status, body } = buildErrorExceptionPayload(err);
+      throw new HttpException(body, status, { cause: err });
+    }
+  }
+
 }
