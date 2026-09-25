@@ -30,6 +30,25 @@ describe('ApplicationsService with encrypted RUT', () => {
     if (previousKey === undefined) delete process.env.RUT_ENCRYPTION_KEY_V1;
     else process.env.RUT_ENCRYPTION_KEY_V1 = previousKey;
   });
+  it('lists applications without selecting RUT or encryption metadata', async () => {
+    const rows = [{ id: '1', periodo_id: '2', nombre_completo: 'Persona de prueba' }];
+    pool.query = jest.fn().mockResolvedValue({ rows });
+    await expect(service.findAll()).resolves.toEqual({ totalPostulaciones: 1, postulaciones: rows });
+    const sql = pool.query.mock.calls[0][0];
+    expect(sql).not.toMatch(/rut|SELECT\s+\*/i);
+    expect(sql).toContain('estado_postulacion');
+    expect(sql).toContain('ORDER BY created_at DESC, id DESC');
+  });
+  it('returns an empty collection when there are no applications', async () => {
+    pool.query = jest.fn().mockResolvedValue({ rows: [] });
+    await expect(service.findAll()).resolves.toEqual({ totalPostulaciones: 0, postulaciones: [] });
+  });
+  it('does not expose database errors from the listing', async () => {
+    pool.query = jest.fn().mockRejectedValue(new Error('private database detail'));
+    await expect(service.findAll()).rejects.toMatchObject({
+      status: 500, response: { responseCode: 'E003', message: 'No se pudieron consultar las postulaciones' },
+    });
+  });
   it('validates the RUT check digit', () => {
     expect(normalizeRut('12.345.678-5')).toBe('12345678-5');
     expect(normalizeRut('12345678-0')).toBeNull();

@@ -120,4 +120,25 @@ export class ApplicationsService {
       client?.release(discardConnection);
     }
   }
+
+  async findAll() {
+    // TODO(IAM): protect this administrative listing. RUT and encryption
+    // metadata are deliberately excluded; never replace this with SELECT *.
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT id, periodo_id, nombre_completo, edad, correo_institucional,
+          campus, carrera, anio_ingreso, anio_actual,
+          area_interes1, area_interes2, area_interes3, ayudantias,
+          horas_disponibles_semanales, motivo_postulacion, proyecto_idea,
+          portafolio, postulacion_conjunta, pitch, apodo,
+          estado_postulacion, resuelta_en, resuelta_por, created_at, updated_at
+        FROM public.postulaciones
+        ORDER BY created_at DESC, id DESC
+      `);
+      return { totalPostulaciones: rows.length, postulaciones: rows };
+    } catch {
+      fail(500, 'E003', 'No se pudieron consultar las postulaciones');
+    }
+  }
+
 }

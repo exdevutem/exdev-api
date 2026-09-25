@@ -67,13 +67,24 @@ El `docker-compose.yml` usa `/opt/exdev-api/.env` y publica `3001:3000`: dentro 
 | Método | Ruta | Función | Acceso previsto |
 |---|---|---|---|
 | POST | `/applications` | Registrar una postulación en el período habilitado. | Formulario público. |
+| GET | `/applications` | Listar postulaciones sin RUT ni metadatos de cifrado. | Administración; actualmente sin IAM. |
 | GET | `/members` | Listar perfiles públicos activos. | Público. |
 | POST | `/members` | Crear miembro con roles y especialidades. | Administración; IAM pendiente. |
 | GET | `/projects` | Listar proyectos publicados y participantes públicos. | Público. |
 | POST | `/projects` | Crear proyecto y sus asociaciones de miembros. | Administración; IAM pendiente. |
 | GET | `/events` | Consultar agenda publicada. | Público. |
 
-No hay GET por ID, PUT/PATCH/DELETE, GET de postulaciones, descifrado de RUT ni endpoints de votos, períodos, patrocinadores o catálogos implementados actualmente. Que exista una tabla no implica que exista una ruta.
+No hay GET por ID, PUT/PATCH/DELETE, descifrado de RUT ni endpoints de votos, períodos, patrocinadores o catálogos implementados actualmente. Que exista una tabla no implica que exista una ruta.
+
+## GET /applications
+
+Lista todas las postulaciones, ordenadas por created_at descendente y luego ID descendente. No recibe body ni filtros; aún no tiene paginación. Responde 200 con `{ "totalPostulaciones": 0, "postulaciones": [] }` cuando no hay registros.
+
+Cada objeto incluye: id, periodo_id, nombre_completo, edad, correo_institucional, campus, carrera, anio_ingreso, anio_actual, area_interes1, area_interes2, area_interes3, ayudantias, horas_disponibles_semanales, motivo_postulacion, proyecto_idea, portafolio, postulacion_conjunta, pitch, apodo, estado_postulacion, resuelta_en, resuelta_por, created_at y updated_at.
+
+**No selecciona ni devuelve rut, rut_cifrado o rut_clave_version, y no descifra datos.** El total se calcula con las filas de la misma consulta. Si falla, devuelve 500 con responseCode E003 y un mensaje genérico.
+
+**Acceso administrativo aún sin protección IAM:** sigue exponiendo nombres, correos y respuestas personales. Excluir el RUT no vuelve anónima la respuesta; restringir su acceso antes de exponerlo públicamente.
 
 ## POST /applications
 
@@ -480,4 +491,4 @@ Solicitar esos documentos al equipo al incorporarse. Un push del código no ejec
 
 Antes de desplegar: validar el esquema de staging, coordinar cambios de BD/API, configurar secretos y CORS, proteger los POST administrativos y verificar un período habilitado para probar postulaciones. No incluir datos reales en ejemplos o pruebas.
 
-Pendientes de implementación: IAM, administración Rafael, edición y cierre de períodos, votaciones editables hasta su plazo, resolución de postulaciones, patrocinadores, detalle de eventos y storage. No hay endpoints para estas funciones salvo los seis documentados arriba.
+Pendientes de implementación: IAM, administración Rafael, edición y cierre de períodos, votaciones editables hasta su plazo, resolución de postulaciones, patrocinadores, detalle de eventos y storage. No hay endpoints para estas funciones salvo los documentados arriba.
