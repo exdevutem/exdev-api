@@ -1,5 +1,24 @@
-import { BadRequestException, ConflictException, Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Pool } from 'pg';
+import {
+  bodyObject,
+  boolean,
+  choice,
+  dateRange,
+  id,
+  ids,
+  integer,
+  optionalDate,
+  optionalText,
+  requiredText,
+  transaction,
+  Data,
+} from '../common/admin-data';
 import { PG_POOL } from '../shared/connections/database.module';
 
 @Injectable()
@@ -43,104 +62,144 @@ export class ProjectsService {
     return { data: rows };
   }
 
-  async create(rawBody: unknown) {
-    const body = this.validateCreateBody(rawBody);
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const { rows } = await client.query(
-        `INSERT INTO public.proyectos
-          (nombre, descripcion_breve, descripcion, estado, fecha_inicio, fecha_fin,
-           publicado, destacado, orden)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         RETURNING id;`,
-        [body.nombre, body.descripcionBreve, body.descripcion, body.estado,
-         body.fechaInicio, body.fechaFin, body.publicado, body.destacado, body.orden],
-      );
-      const projectId = rows[0].id;
-
-      for (const member of body.members) {
+  async findAdmin() {
+    const { rows } = await this.pool
+      .query(`SELECT p.id, p.nombre, p.descripcion_breve, p.descripcion,
+      p.estado, to_char(p.fecha_inicio,'YYYY-MM-DD') AS fecha_inicio, to_char(p.fecha_fin,'YYYY-MM-DD') AS fecha_fin,
+      p.publicado, p.destacado, p.orden,
+      COALESCE((SELECT json_agg(json_build_object('id',m.id::text,'nombre',m.nombre,'funcion',pm.funcion,
+        'fecha_inicio',to_char(pm.fecha_inicio,'YYYY-MM-DD'),'fecha_fin',to_char(pm.fecha_fin,'YYYY-MM-DD')) ORDER BY m.nombre,m.id)
+        FROM public.proyecto_miembros pm JOIN public.miembros m ON m.id=pm.miembro_id WHERE pm.proyecto_id=p.id),'[]') AS miembros
+      FROM public.proyectos p ORDER BY p.orden,p.created_at DESC,p.id DESC`);
+    return { data: rows };
+  }
+  create(body: unknown) {
+    return this.save(body);
+  }
+  update(projectId: string, body: unknown) {
+    return this.save(body, id(projectId));
+  }
+  private save(raw: unknown, projectId?: string) {
+    const body = bodyObject(
+      raw,
+      [
+        'nombre',
+        'descripcionBreve',
+        'descripcion',
+        'estado',
+        'fechaInicio',
+        'fechaFin',
+        'publicado',
+        'destacado',
+        'orden',
+        'members',
+      ],
+      !!projectId,
+    );
+    return transaction(this.pool, async (client) => {
+      let previous: Data = {
+        descripcionBreve: null,
+        descripcion: null,
+        estado: 'planificacion',
+        fechaInicio: null,
+        fechaFin: null,
+        publicado: false,
+        destacado: false,
+        orden: 0,
+      };
+      if (projectId) {
+        const result = await client.query(
+          `SELECT nombre, descripcion_breve AS "descripcionBreve", descripcion, estado,
+          to_char(fecha_inicio,'YYYY-MM-DD') AS "fechaInicio", to_char(fecha_fin,'YYYY-MM-DD') AS "fechaFin", publicado, destacado, orden
+          FROM public.proyectos WHERE id=$1 FOR UPDATE`,
+          [projectId],
+        );
+        if (!result.rows.length)
+          throw new NotFoundException('Proyecto no encontrado');
+        previous = result.rows[0];
+      }
+      const data = { ...previous, ...body };
+      const start = optionalDate(data.fechaInicio, 'fechaInicio'),
+        end = optionalDate(data.fechaFin, 'fechaFin');
+      dateRange(start, end);
+      const published = boolean(data.publicado, 'publicado'),
+        featured = boolean(data.destacado, 'destacado');
+      if (featured && !published)
+        throw new BadRequestException('Destacado requiere publicación');
+      const values = [
+        requiredText(data.nombre, 'nombre'),
+        optionalText(data.descripcionBreve, 'descripcionBreve'),
+        optionalText(data.descripcion, 'descripcion'),
+        choice([
+          'planificacion',
+          'activo',
+          'bloqueado',
+          'pausado',
+          'completado',
+          'cancelado',
+        ])(data.estado, 'estado'),
+        start,
+        end,
+        published,
+        featured,
+        integer(data.orden, 'orden'),
+      ];
+      if (projectId)
         await client.query(
-          `INSERT INTO public.proyecto_miembros
-            (proyecto_id, miembro_id, funcion, fecha_inicio, fecha_fin)
-           VALUES ($1,$2,$3,$4,$5);`,
-          [projectId, member.memberId, member.functionName, member.startDate, member.endDate],
+          `UPDATE public.proyectos SET nombre=$1,descripcion_breve=$2,descripcion=$3,estado=$4,fecha_inicio=$5,fecha_fin=$6,publicado=$7,destacado=$8,orden=$9 WHERE id=$10`,
+          [...values, projectId],
+        );
+      else {
+        const result = await client.query(
+          `INSERT INTO public.proyectos (nombre,descripcion_breve,descripcion,estado,fecha_inicio,fecha_fin,publicado,destacado,orden) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+          values,
+        );
+        projectId = String(result.rows[0].id);
+      }
+      if (body.members !== undefined) {
+        if (!Array.isArray(body.members))
+          throw new BadRequestException('members debe ser un arreglo');
+        const members = body.members.map((rawMember) => {
+          const m = bodyObject(rawMember, [
+            'memberId',
+            'functionName',
+            'startDate',
+            'endDate',
+          ]);
+          const startDate = optionalDate(m.startDate, 'startDate'),
+            endDate = optionalDate(m.endDate, 'endDate');
+          dateRange(startDate, endDate);
+          return {
+            memberId: id(m.memberId, 'memberId'),
+            functionName: optionalText(m.functionName, 'functionName'),
+            startDate,
+            endDate,
+          };
+        });
+        const memberIds = ids(
+          members.map((m) => m.memberId),
+          'members',
+        );
+        for (const member of members) {
+          await client.query(
+            `INSERT INTO public.proyecto_miembros (proyecto_id,miembro_id,funcion,fecha_inicio,fecha_fin) VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT (proyecto_id,miembro_id) DO UPDATE SET funcion=EXCLUDED.funcion,fecha_inicio=EXCLUDED.fecha_inicio,fecha_fin=EXCLUDED.fecha_fin`,
+            [
+              projectId,
+              member.memberId,
+              member.functionName,
+              member.startDate,
+              member.endDate,
+            ],
+          );
+        }
+        await client.query(
+          `DELETE FROM public.proyecto_miembros WHERE proyecto_id=$1 AND NOT (miembro_id=ANY($2::bigint[]))`,
+          [projectId, memberIds],
         );
       }
-
-      await client.query('COMMIT');
-      return { message: 'Proyecto creado correctamente', id: projectId };
-    } catch (error: any) {
-      await client.query('ROLLBACK');
-      if (error?.code === '23505') throw new ConflictException('El proyecto o uno de sus miembros ya existe');
-      if (['23503', '23514', '22P02', '22007'].includes(error?.code)) throw new BadRequestException('Los datos del proyecto no son válidos');
-      throw new InternalServerErrorException('No fue posible crear el proyecto');
-    } finally {
-      client.release();
-    }
-  }
-
-  private validateCreateBody(rawBody: unknown) {
-    if (!rawBody || typeof rawBody !== 'object') throw new BadRequestException('El cuerpo es obligatorio');
-    const body = rawBody as Record<string, unknown>;
-    const estado = body.estado ?? 'planificacion';
-    const validStates = ['planificacion', 'activo', 'bloqueado', 'pausado', 'completado', 'cancelado'];
-    if (typeof estado !== 'string' || !validStates.includes(estado)) throw new BadRequestException('estado no es válido');
-    const publicado = body.publicado ?? false;
-    const destacado = body.destacado ?? false;
-    if (typeof publicado !== 'boolean' || typeof destacado !== 'boolean' || (destacado && !publicado)) {
-      throw new BadRequestException('La configuración de publicación no es válida');
-    }
-    const orden = body.orden ?? 0;
-    if (!Number.isSafeInteger(orden)) throw new BadRequestException('orden debe ser un entero');
-    const members = body.members ?? [];
-    if (!Array.isArray(members)) throw new BadRequestException('members debe ser un arreglo');
-    const parsedMembers = members.map((rawMember) => this.parseMember(rawMember));
-    const memberIds = parsedMembers.map((member) => member.memberId);
-    if (new Set(memberIds).size !== memberIds.length) throw new BadRequestException('Un miembro no puede repetirse en el proyecto');
-
-    return {
-      nombre: this.requiredText(body.nombre, 'nombre'),
-      descripcionBreve: this.optionalText(body.descripcionBreve, 'descripcionBreve'),
-      descripcion: this.optionalText(body.descripcion, 'descripcion'),
-      estado,
-      fechaInicio: this.optionalDate(body.fechaInicio, 'fechaInicio'),
-      fechaFin: this.optionalDate(body.fechaFin, 'fechaFin'),
-      publicado, destacado, orden,
-      members: parsedMembers,
-    };
-  }
-
-  private parseMember(rawMember: unknown) {
-    if (!rawMember || typeof rawMember !== 'object') throw new BadRequestException('Cada miembro del proyecto debe ser un objeto');
-    const member = rawMember as Record<string, unknown>;
-    const memberId = Number(member.memberId);
-    if (!Number.isSafeInteger(memberId) || memberId < 1) throw new BadRequestException('memberId no es válido');
-    return {
-      memberId,
-      functionName: this.optionalText(member.functionName, 'functionName'),
-      startDate: this.optionalDate(member.startDate, 'startDate'),
-      endDate: this.optionalDate(member.endDate, 'endDate'),
-    };
-  }
-
-  private requiredText(value: unknown, field: string): string {
-    if (typeof value !== 'string' || !value.trim()) throw new BadRequestException(`${field} es obligatorio`);
-    return value.trim();
-  }
-
-  private optionalText(value: unknown, field: string): string | null {
-    if (value === undefined || value === null || value === '') return null;
-    if (typeof value !== 'string') throw new BadRequestException(`${field} debe ser texto`);
-    return value.trim() || null;
-  }
-
-  private optionalDate(value: unknown, field: string): string | null {
-    if (value === undefined || value === null || value === '') return null;
-    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      throw new BadRequestException(`${field} debe usar el formato YYYY-MM-DD`);
-    }
-    return value;
+      return { id: projectId };
+    });
   }
 
   private parseLimit(rawLimit?: string): number {
