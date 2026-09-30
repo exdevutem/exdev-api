@@ -9,7 +9,7 @@ import {
   Query,
   Req,
 } from '@nestjs/common';
-import { AuthRequest, Permissions } from '../auth/iam.service';
+import { AuthRequest, Permissions, Public } from '../auth/iam.service';
 import { WorkflowsService } from './workflows.service';
 
 @Controller('announcements')
@@ -21,7 +21,9 @@ export class AnnouncementsController {
   ) {
     return this.service.announcements(true, limit, offset);
   }
-  @Permissions('announcements.read') @Get() list(
+  @Public()
+  @Get()
+  list(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ) {

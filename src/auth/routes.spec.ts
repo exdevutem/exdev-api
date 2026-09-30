@@ -4,8 +4,10 @@ import * as request from 'supertest';
 import { AppModule } from '../app.module';
 import { PG_POOL } from '../shared/connections/database.module';
 import { IamService } from './iam.service';
+import { WorkflowsService } from '../workflows/workflows.service';
 describe('HTTP authorization policies', () => {
   let app: INestApplication;
+  let workflows: WorkflowsService;
   const iam = {
     validate: jest.fn().mockResolvedValue({
       userId: 'user',
@@ -26,6 +28,7 @@ describe('HTTP authorization policies', () => {
       .overrideProvider(IamService)
       .useValue(iam)
       .compile();
+    workflows = module.get(WorkflowsService);
     app = module.createNestApplication();
     await app.init();
   });
@@ -42,7 +45,6 @@ describe('HTTP authorization policies', () => {
     '/specialties',
     '/periods',
     '/applications',
-    '/announcements',
     '/announcements/admin',
     '/applications/1/my-vote',
     '/applications/1/votes',
@@ -85,6 +87,20 @@ describe('HTTP authorization policies', () => {
       await request(app.getHttpServer()).get(path).expect(200);
     },
   );
+  it('GET /announcements?limit=3 works without a cookie or IAM validation', async () => {
+    iam.validate.mockClear();
+    const list = jest.spyOn(workflows, 'announcements');
+    try {
+      const response = await request(app.getHttpServer())
+        .get('/announcements?limit=3')
+        .expect(200);
+      expect(response.body).toEqual({ data: [], hasMore: false });
+      expect(list).toHaveBeenCalledWith(false, '3', undefined);
+      expect(iam.validate).not.toHaveBeenCalled();
+    } finally {
+      list.mockRestore();
+    }
+  });
   it('does not infer management permission from an authenticated member', async () => {
     const name =
       process.env.IAM_SESSION_COOKIE || '__Host-exdev_rafael_session';
