@@ -101,13 +101,29 @@ describe('HTTP authorization policies', () => {
       list.mockRestore();
     }
   });
-  it('does not infer management permission from an authenticated member', async () => {
+  it.each([
+    '/projects/admin',
+    '/events/admin',
+    '/members/admin',
+    '/announcements/admin',
+  ])('authenticated member without permissions cannot GET %s', async (path) => {
     const name =
       process.env.IAM_SESSION_COOKIE || '__Host-exdev_rafael_session';
     await request(app.getHttpServer())
-      .post('/members')
+      .get(path)
       .set('Cookie', `${name}=${'a'.repeat(43)}`)
-      .send({})
       .expect(403);
   });
+  it.each(['/members', '/projects', '/events', '/announcements'])(
+    'does not infer management permission for POST %s from an authenticated member',
+    async (path) => {
+      const name =
+        process.env.IAM_SESSION_COOKIE || '__Host-exdev_rafael_session';
+      await request(app.getHttpServer())
+        .post(path)
+        .set('Cookie', `${name}=${'a'.repeat(43)}`)
+        .send({})
+        .expect(403);
+    },
+  );
 });
