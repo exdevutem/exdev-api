@@ -1,16 +1,29 @@
-import { Body, Controller, Get, Post, Res, HttpStatus } from '@nestjs/common';
-import { Response } from 'express';
+import { Public, Permissions } from '../auth/iam.service';
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { ApplicationsService } from './applications.service';
-//import { created, fail } from './response/http-response';
 @Controller('applications')
 export class ApplicationsController {
-    constructor(private readonly applicationsService: ApplicationsService){}
-        @Post()
-        create(@Body() body: any){
-            return this.applicationsService.create(body);
-        }
-        @Get()
-        findAll() {
-            return this.applicationsService.findAll();
-        }
+  constructor(private readonly applicationsService: ApplicationsService) {}
+  @Public()
+  @Post()
+  create(@Body() body: unknown) {
+    return this.applicationsService.create(body);
+  }
+  @Permissions('applications.read')
+  @Get()
+  findAll(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('estado') state?: string,
+    @Query('periodo_id') period?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.applicationsService.findAll(
+      limit,
+      offset,
+      state,
+      period,
+      search,
+    );
+  }
 }
