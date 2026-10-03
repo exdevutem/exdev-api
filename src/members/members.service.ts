@@ -72,6 +72,10 @@ export class MembersService {
       SELECT m.id, m.nombre, m.correo_institucional, m.carrera, m.anio_ingreso_carrera,
         m.estado, m.perfil_publico, m.foto_publica, m.rafael_access_level,
         (m.iam_subject IS NOT NULL) AS iam_linked,
+        CASE WHEN m.rafael_access_level='miembro' AND EXISTS (
+          SELECT 1 FROM public.miembro_roles mr JOIN public.roles_club r ON r.id=mr.rol_id
+          WHERE mr.miembro_id=m.id AND mr.estado='activo' AND lower(btrim(r.nombre))='titulado'
+        ) THEN 'titulado' ELSE m.rafael_access_level END AS member_type,
         COALESCE((SELECT json_agg(r.nombre ORDER BY r.nombre) FROM public.miembro_roles mr
           JOIN public.roles_club r ON r.id = mr.rol_id WHERE mr.miembro_id = m.id AND mr.estado = 'activo'), '[]') AS roles,
         COALESCE((SELECT json_agg(mr.rol_id::text ORDER BY mr.rol_id) FROM public.miembro_roles mr
@@ -110,8 +114,25 @@ export class MembersService {
       'roleIds',
       'specialtyIds',
       'accessLevel',
+      'memberType',
     ];
     const body = bodyObject(raw, fields, !!memberId);
+    if (
+      body.memberType !== undefined &&
+      (body.accessLevel !== undefined || body.roleIds !== undefined)
+    )
+      throw new BadRequestException(
+        'Envía solo memberType para seleccionar el tipo de miembro',
+      );
+    const memberType =
+      body.memberType === undefined
+        ? undefined
+        : choice(['trainee', 'miembro', 'titulado', 'representante'])(
+            body.memberType,
+            'memberType',
+          );
+    if (memberType !== undefined)
+      body.accessLevel = memberType === 'titulado' ? 'miembro' : memberType;
     return transaction(this.pool, async (client) => {
       let previous: Data = {
         estado: 'activo',
@@ -146,7 +167,7 @@ export class MembersService {
         if (!actor || !this.iam)
           throw new ForbiddenException('PERMISSION_REQUIRED');
         this.iam.require(actor, 'access_levels.manage');
-        if (changeLevel) {
+        if (changeLevel || memberType !== undefined) {
           const fresh = await this.iam.validate(actor.token);
           this.iam.require(fresh, 'members.manage', 'access_levels.manage');
           if (
@@ -163,6 +184,32 @@ export class MembersService {
         }
       }
       const data = { ...previous, ...body };
+      if (memberType !== undefined) {
+        const names =
+          memberType === 'miembro'
+            ? ['miembro', 'miembro activo']
+            : [memberType];
+        const target = await client.query(
+          `SELECT id::text FROM public.roles_club WHERE lower(btrim(nombre))=ANY($1::text[]) AND estado='activo' FOR SHARE`,
+          [names],
+        );
+        if (target.rows.length !== 1)
+          throw new BadRequestException(
+            'El tipo debe tener un único rol activo correspondiente en el catálogo del club',
+          );
+        const otherRoles = memberId
+          ? await client.query(
+              `SELECT mr.rol_id::text AS id FROM public.miembro_roles mr JOIN public.roles_club r ON r.id=mr.rol_id
+           WHERE mr.miembro_id=$1 AND mr.estado='activo'
+           AND lower(btrim(r.nombre)) NOT IN ('trainee','miembro','miembro activo','titulado','representante')`,
+              [memberId],
+            )
+          : { rows: [] };
+        body.roleIds = [
+          ...otherRoles.rows.map((row) => row.id),
+          target.rows[0].id,
+        ];
+      }
       const nombre = requiredText(data.nombre, 'nombre');
       const carrera = requiredText(data.carrera, 'carrera');
       const email =
