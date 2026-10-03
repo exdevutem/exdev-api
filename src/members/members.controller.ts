@@ -57,7 +57,7 @@ export class MembersController {
     @Body() body: unknown,
     @Req() req: AuthRequest,
   ) {
-    return this.membersService.update(id, body, req.actor.memberId);
+    return this.membersService.update(id, body, req.actor.memberId, req.actor);
   }
 
   @Public()
@@ -68,7 +68,7 @@ export class MembersController {
 
   @Permissions('members.manage')
   @Post()
-  create(@Body() body: unknown) {
-    return this.membersService.create(body);
+  create(@Body() body: unknown, @Req() req: AuthRequest) {
+    return this.membersService.create(body, req.actor);
   }
 }
