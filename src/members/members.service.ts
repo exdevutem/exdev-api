@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { Actor, IamService } from '../auth/iam.service';
 import {
   BadRequestException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -22,7 +24,10 @@ import { PG_POOL } from '../shared/connections/database.module';
 
 @Injectable()
 export class MembersService {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(PG_POOL) private readonly pool: Pool,
+    private readonly iam?: IamService,
+  ) {}
 
   async findPublic(rawLimit?: string) {
     const limit = this.parseLimit(rawLimit);
@@ -65,7 +70,8 @@ export class MembersService {
     const { rows } = await this.pool.query(
       `
       SELECT m.id, m.nombre, m.correo_institucional, m.carrera, m.anio_ingreso_carrera,
-        m.estado, m.perfil_publico, m.foto_publica,
+        m.estado, m.perfil_publico, m.foto_publica, m.rafael_access_level,
+        (m.iam_subject IS NOT NULL) AS iam_linked,
         COALESCE((SELECT json_agg(r.nombre ORDER BY r.nombre) FROM public.miembro_roles mr
           JOIN public.roles_club r ON r.id = mr.rol_id WHERE mr.miembro_id = m.id AND mr.estado = 'activo'), '[]') AS roles,
         COALESCE((SELECT json_agg(mr.rol_id::text ORDER BY mr.rol_id) FROM public.miembro_roles mr
@@ -80,14 +86,19 @@ export class MembersService {
     return { data: rows };
   }
 
-  create(body: unknown) {
-    return this.save(body);
+  create(body: unknown, actor?: Actor) {
+    return this.save(body, undefined, actor?.memberId, actor);
   }
-  update(memberId: string, body: unknown, actorId?: string) {
-    return this.save(body, id(memberId), actorId);
+  update(memberId: string, body: unknown, actorId?: string, actor?: Actor) {
+    return this.save(body, id(memberId), actorId, actor);
   }
 
-  private save(raw: unknown, memberId?: string, actorId?: string) {
+  private save(
+    raw: unknown,
+    memberId?: string,
+    actorId?: string,
+    actor?: Actor,
+  ) {
     const fields = [
       'nombre',
       'correoInstitucional',
@@ -98,6 +109,7 @@ export class MembersService {
       'fotoPublica',
       'roleIds',
       'specialtyIds',
+      'accessLevel',
     ];
     const body = bodyObject(raw, fields, !!memberId);
     return transaction(this.pool, async (client) => {
@@ -107,10 +119,11 @@ export class MembersService {
         fotoPublica: false,
         correoInstitucional: null,
         anioIngresoCarrera: null,
+        accessLevel: null,
       };
       if (memberId) {
         const result = await client.query(
-          `SELECT iam_subject, nombre, correo_institucional AS "correoInstitucional", carrera,
+          `SELECT iam_subject, nombre, correo_institucional AS "correoInstitucional", carrera, rafael_access_level AS "accessLevel",
           anio_ingreso_carrera AS "anioIngresoCarrera", estado, perfil_publico AS "perfilPublico", foto_publica AS "fotoPublica"
           FROM public.miembros WHERE id = $1 FOR UPDATE`,
           [memberId],
@@ -118,6 +131,36 @@ export class MembersService {
         if (!result.rows.length)
           throw new NotFoundException('Miembro no encontrado');
         previous = result.rows[0];
+      }
+      const nextLevel =
+        body.accessLevel === undefined
+          ? (previous.accessLevel ?? null)
+          : body.accessLevel === null
+            ? null
+            : choice(['trainee', 'miembro', 'representante'])(
+                body.accessLevel,
+                'accessLevel',
+              );
+      const changeLevel = nextLevel !== (previous.accessLevel ?? null);
+      if (body.accessLevel !== undefined) {
+        if (!actor || !this.iam)
+          throw new ForbiddenException('PERMISSION_REQUIRED');
+        this.iam.require(actor, 'access_levels.manage');
+        if (changeLevel) {
+          const fresh = await this.iam.validate(actor.token);
+          this.iam.require(fresh, 'members.manage', 'access_levels.manage');
+          if (
+            fresh.userId !== actor.userId ||
+            fresh.memberId !== actor.memberId
+          )
+            throw new ForbiddenException('IDENTITY_CHANGED');
+          if (
+            (nextLevel === 'representante' ||
+              previous.accessLevel === 'representante') &&
+            !fresh.isAdministrator
+          )
+            throw new ForbiddenException('ADMINISTRATOR_REQUIRED');
+        }
       }
       const data = { ...previous, ...body };
       const nombre = requiredText(data.nombre, 'nombre');
@@ -179,6 +222,17 @@ export class MembersService {
           values,
         );
         memberId = String(result.rows[0].id);
+      }
+      if (changeLevel) {
+        await client.query(
+          'UPDATE public.miembros SET rafael_access_level=$1 WHERE id=$2',
+          [nextLevel, memberId],
+        );
+        await client.query(
+          `INSERT INTO public.rafael_access_level_audit(member_id,actor_iam_subject,previous_level,next_level)
+           VALUES($1,$2,$3,$4)`,
+          [memberId, actor!.userId, previous.accessLevel ?? null, nextLevel],
+        );
       }
       if (body.roleIds !== undefined) {
         const roleIds = ids(body.roleIds, 'roleIds');

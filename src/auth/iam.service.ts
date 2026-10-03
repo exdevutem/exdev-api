@@ -17,6 +17,7 @@ export const Public = () => SetMetadata('iam.public', true);
 export const Permissions = (...permissions: string[]) =>
   SetMetadata('iam.permissions', permissions);
 export interface Actor {
+  isAdministrator?: boolean;
   userId: string;
   memberId: string;
   permissions: string[];
@@ -90,6 +91,9 @@ export class IamService {
     if (!rows[0] || rows[0].id !== value.member?.id)
       throw new ForbiddenException('MEMBER_NOT_ACTIVE');
     return {
+      isAdministrator:
+        Array.isArray(value.roles) &&
+        value.roles.includes('administrador_rafael'),
       userId: value.user.id,
       memberId: rows[0].id,
       permissions: value.permissions,
