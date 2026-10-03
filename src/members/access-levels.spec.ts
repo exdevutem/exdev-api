@@ -25,7 +25,9 @@ function fixture(previous: string | null = null, administrator = false) {
       ? [{ ...profile, iam_subject: null, accessLevel: previous }]
       : sql.includes('INSERT INTO public.miembros')
         ? [{ id: '2' }]
-        : [],
+        : sql.includes('FROM public.roles_club')
+          ? [{ id: '42' }]
+          : [],
     rowCount: 1,
   }));
   const client = { query, release: jest.fn() };
@@ -131,5 +133,78 @@ describe('Member access level authorization', () => {
         accessLevel: 'representante',
       }),
     ).toThrow('campos no permitidos');
+  });
+});
+
+describe('Unified member type', () => {
+  it.each([
+    ['trainee', 'trainee', ['trainee']],
+    ['miembro', 'miembro', ['miembro', 'miembro activo']],
+    ['titulado', 'miembro', ['titulado']],
+    ['representante', 'representante', ['representante']],
+  ])(
+    'saves %s with its club role and %s access atomically',
+    async (type, level, names) => {
+      const f = fixture(null, true);
+      await f.service.create({ ...profile, memberType: type }, f.actor);
+      expect(f.query).toHaveBeenCalledWith(
+        expect.stringContaining('lower(btrim(nombre))=ANY'),
+        [names],
+      );
+      expect(f.query).toHaveBeenCalledWith(
+        'UPDATE public.miembros SET rafael_access_level=$1 WHERE id=$2',
+        [level, '2'],
+      );
+      expect(f.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO public.miembro_roles'),
+        ['2', '42'],
+      );
+      expect(f.query).toHaveBeenCalledWith('COMMIT');
+    },
+  );
+  it('changes member to graduate without changing member permissions', async () => {
+    const f = fixture('miembro');
+    await f.service.update('2', { memberType: 'titulado' }, '1', f.actor);
+    expect(f.iam.validate).toHaveBeenCalled();
+    expect(f.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO public.miembro_roles'),
+      ['2', '42'],
+    );
+    expect(
+      f.query.mock.calls.some(([sql]) =>
+        sql.includes('SET rafael_access_level'),
+      ),
+    ).toBe(false);
+  });
+  it.each([
+    [null, 'representante'],
+    ['representante', 'miembro'],
+  ])('requires administrator for %s to %s', async (previous, next) => {
+    const f = fixture(previous);
+    await expect(
+      f.service.update('2', { memberType: next }, '1', f.actor),
+    ).rejects.toThrow('ADMINISTRATOR_REQUIRED');
+    expect(f.query).toHaveBeenCalledWith('ROLLBACK');
+  });
+  it('rejects conflicting legacy selection fields', () => {
+    const f = fixture();
+    expect(() =>
+      f.service.create(
+        { ...profile, memberType: 'titulado', roleIds: ['1'] },
+        f.actor,
+      ),
+    ).toThrow('Envía solo memberType');
+    expect(f.query).not.toHaveBeenCalled();
+  });
+  it('rolls back when the matching catalog role is missing', async () => {
+    const f = fixture();
+    f.query.mockImplementation(async () => ({ rows: [], rowCount: 0 }));
+    await expect(
+      f.service.create({ ...profile, memberType: 'titulado' }, f.actor),
+    ).rejects.toThrow('único rol activo');
+    expect(f.query).toHaveBeenCalledWith('ROLLBACK');
+    expect(
+      f.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO')),
+    ).toBe(false);
   });
 });
