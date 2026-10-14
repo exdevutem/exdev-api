@@ -17,6 +17,10 @@ async function bootstrap() {
     'http://127.0.0.1:3000',
     'https://tomas.exdev.cl',
     'https://www.tomas.exdev.cl',
+    'https://rafael.exdev.cl',
+    'https://www.rafael.exdev.cl',
+    'https://dev-rafael.exdev.cl',
+    'https://www.dev-rafael.exdev.cl',
   ];
   app.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -29,9 +33,15 @@ async function bootstrap() {
       if (!origin) return cb(null, true);
       cb(null, WEB_ORIGINS.includes(origin));
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false,
+    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-CSRF-Token',
+      'If-Match',
+      'Idempotency-Key',
+    ],
+    credentials: true,
     optionsSuccessStatus: 204,
   });
 

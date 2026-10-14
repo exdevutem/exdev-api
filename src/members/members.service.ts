@@ -1,10 +1,33 @@
-import { BadRequestException, ConflictException, Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { Actor, IamService } from '../auth/iam.service';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Pool } from 'pg';
+import {
+  bodyObject,
+  boolean,
+  choice,
+  id,
+  ids,
+  integer,
+  optionalText,
+  requiredText,
+  transaction,
+  Data,
+} from '../common/admin-data';
 import { PG_POOL } from '../shared/connections/database.module';
 
 @Injectable()
 export class MembersService {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(PG_POOL) private readonly pool: Pool,
+    private readonly iam?: IamService,
+  ) {}
 
   async findPublic(rawLimit?: string) {
     const limit = this.parseLimit(rawLimit);
@@ -43,91 +66,277 @@ export class MembersService {
     return { data: rows };
   }
 
-  async create(rawBody: unknown) {
-    const body = this.validateCreateBody(rawBody);
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const { rows } = await client.query(
-        `INSERT INTO public.miembros
-          (iam_subject, nombre, correo_institucional, carrera, anio_ingreso_carrera,
-           estado, perfil_publico, foto_publica)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         RETURNING id;`,
-        [body.iamSubject, body.nombre, body.correoInstitucional, body.carrera,
-         body.anioIngresoCarrera, body.estado, body.perfilPublico, body.fotoPublica],
+  async findAdmin(memberId?: string) {
+    const { rows } = await this.pool.query(
+      `
+      SELECT m.id, m.nombre, m.correo_institucional, m.carrera, m.anio_ingreso_carrera,
+        m.estado, m.perfil_publico, m.foto_publica, m.rafael_access_level,
+        (m.iam_subject IS NOT NULL) AS iam_linked,
+        CASE WHEN m.rafael_access_level='miembro' AND EXISTS (
+          SELECT 1 FROM public.miembro_roles mr JOIN public.roles_club r ON r.id=mr.rol_id
+          WHERE mr.miembro_id=m.id AND mr.estado='activo' AND lower(btrim(r.nombre))='titulado'
+        ) THEN 'titulado' ELSE m.rafael_access_level END AS member_type,
+        COALESCE((SELECT json_agg(r.nombre ORDER BY r.nombre) FROM public.miembro_roles mr
+          JOIN public.roles_club r ON r.id = mr.rol_id WHERE mr.miembro_id = m.id AND mr.estado = 'activo'), '[]') AS roles,
+        COALESCE((SELECT json_agg(mr.rol_id::text ORDER BY mr.rol_id) FROM public.miembro_roles mr
+          WHERE mr.miembro_id = m.id AND mr.estado = 'activo'), '[]') AS role_ids,
+        COALESCE((SELECT json_agg(e.nombre ORDER BY e.nombre) FROM public.miembro_especialidades me
+          JOIN public.especialidades e ON e.id = me.especialidad_id WHERE me.miembro_id = m.id), '[]') AS especialidades,
+        COALESCE((SELECT json_agg(me.especialidad_id::text ORDER BY me.especialidad_id) FROM public.miembro_especialidades me
+          WHERE me.miembro_id = m.id), '[]') AS specialty_ids
+      FROM public.miembros m WHERE ($1::bigint IS NULL OR m.id=$1) ORDER BY m.nombre, m.id`,
+      [memberId ?? null],
+    );
+    return { data: rows };
+  }
+
+  create(body: unknown, actor?: Actor) {
+    return this.save(body, undefined, actor?.memberId, actor);
+  }
+  update(memberId: string, body: unknown, actorId?: string, actor?: Actor) {
+    return this.save(body, id(memberId), actorId, actor);
+  }
+
+  private save(
+    raw: unknown,
+    memberId?: string,
+    actorId?: string,
+    actor?: Actor,
+  ) {
+    const fields = [
+      'nombre',
+      'correoInstitucional',
+      'carrera',
+      'anioIngresoCarrera',
+      'estado',
+      'perfilPublico',
+      'fotoPublica',
+      'roleIds',
+      'specialtyIds',
+      'accessLevel',
+      'memberType',
+    ];
+    const body = bodyObject(raw, fields, !!memberId);
+    if (
+      body.memberType !== undefined &&
+      (body.accessLevel !== undefined || body.roleIds !== undefined)
+    )
+      throw new BadRequestException(
+        'Envía solo memberType para seleccionar el tipo de miembro',
       );
-      const memberId = rows[0].id;
-
-      for (const roleId of body.roleIds) {
+    const memberType =
+      body.memberType === undefined
+        ? undefined
+        : choice(['trainee', 'miembro', 'titulado', 'representante'])(
+            body.memberType,
+            'memberType',
+          );
+    if (memberType !== undefined)
+      body.accessLevel = memberType === 'titulado' ? 'miembro' : memberType;
+    return transaction(this.pool, async (client) => {
+      let previous: Data = {
+        estado: 'activo',
+        perfilPublico: false,
+        fotoPublica: false,
+        correoInstitucional: null,
+        anioIngresoCarrera: null,
+        accessLevel: null,
+      };
+      if (memberId) {
+        const result = await client.query(
+          `SELECT iam_subject, nombre, correo_institucional AS "correoInstitucional", carrera, rafael_access_level AS "accessLevel",
+          anio_ingreso_carrera AS "anioIngresoCarrera", estado, perfil_publico AS "perfilPublico", foto_publica AS "fotoPublica"
+          FROM public.miembros WHERE id = $1 FOR UPDATE`,
+          [memberId],
+        );
+        if (!result.rows.length)
+          throw new NotFoundException('Miembro no encontrado');
+        previous = result.rows[0];
+      }
+      const nextLevel =
+        body.accessLevel === undefined
+          ? (previous.accessLevel ?? null)
+          : body.accessLevel === null
+            ? null
+            : choice(['trainee', 'miembro', 'representante'])(
+                body.accessLevel,
+                'accessLevel',
+              );
+      const changeLevel = nextLevel !== (previous.accessLevel ?? null);
+      if (body.accessLevel !== undefined) {
+        if (!actor || !this.iam)
+          throw new ForbiddenException('PERMISSION_REQUIRED');
+        this.iam.require(actor, 'access_levels.manage');
+        if (changeLevel || memberType !== undefined) {
+          const fresh = await this.iam.validate(actor.token);
+          this.iam.require(fresh, 'members.manage', 'access_levels.manage');
+          if (
+            fresh.userId !== actor.userId ||
+            fresh.memberId !== actor.memberId
+          )
+            throw new ForbiddenException('IDENTITY_CHANGED');
+          if (
+            (nextLevel === 'representante' ||
+              previous.accessLevel === 'representante') &&
+            !fresh.isAdministrator
+          )
+            throw new ForbiddenException('ADMINISTRATOR_REQUIRED');
+        }
+      }
+      const data = { ...previous, ...body };
+      if (memberType !== undefined) {
+        const names =
+          memberType === 'miembro'
+            ? ['miembro', 'miembro activo']
+            : [memberType];
+        const target = await client.query(
+          `SELECT id::text FROM public.roles_club WHERE lower(btrim(nombre))=ANY($1::text[]) AND estado='activo' FOR SHARE`,
+          [names],
+        );
+        if (target.rows.length !== 1)
+          throw new BadRequestException(
+            'El tipo debe tener un único rol activo correspondiente en el catálogo del club',
+          );
+        const otherRoles = memberId
+          ? await client.query(
+              `SELECT mr.rol_id::text AS id FROM public.miembro_roles mr JOIN public.roles_club r ON r.id=mr.rol_id
+           WHERE mr.miembro_id=$1 AND mr.estado='activo'
+           AND lower(btrim(r.nombre)) NOT IN ('trainee','miembro','miembro activo','titulado','representante')`,
+              [memberId],
+            )
+          : { rows: [] };
+        body.roleIds = [
+          ...otherRoles.rows.map((row) => row.id),
+          target.rows[0].id,
+        ];
+      }
+      const nombre = requiredText(data.nombre, 'nombre');
+      const carrera = requiredText(data.carrera, 'carrera');
+      const email =
+        optionalText(
+          data.correoInstitucional,
+          'correoInstitucional',
+        )?.toLowerCase() ?? null;
+      if (email && !/^[^\s@]+@utem\.cl$/.test(email))
+        throw new BadRequestException('El correo debe pertenecer a @utem.cl');
+      const year =
+        data.anioIngresoCarrera == null
+          ? null
+          : integer(data.anioIngresoCarrera, 'anioIngresoCarrera');
+      if (year !== null && (year < 1900 || year > 2100))
+        throw new BadRequestException('Año de ingreso inválido');
+      const estado = choice(['activo', 'inactivo'])(data.estado, 'estado');
+      if (memberId && previous.iam_subject && estado !== previous.estado) {
+        if (memberId === actorId && estado === 'inactivo')
+          throw new BadRequestException(
+            'No puedes desactivar tu propia cuenta',
+          );
+        if (estado === 'activo') {
+          const pending = await client.query(
+            'SELECT id FROM public.iam_access_outbox WHERE miembro_id=$1 AND processed_at IS NULL LIMIT 1',
+            [memberId],
+          );
+          if (pending.rows.length)
+            throw new BadRequestException(
+              'La suspensión IAM sigue pendiente; vuelve a intentar después',
+            );
+        } else
+          await client.query(
+            'INSERT INTO public.iam_access_outbox(id,miembro_id,iam_user_id,application_code) VALUES($1,$2,$3,$4)',
+            [
+              randomUUID(),
+              memberId,
+              previous.iam_subject,
+              process.env.IAM_APPLICATION_CODE || 'rafael',
+            ],
+          );
+      }
+      const profile = boolean(data.perfilPublico, 'perfilPublico');
+      const photo = boolean(data.fotoPublica, 'fotoPublica');
+      if (photo && !profile)
+        throw new BadRequestException(
+          'La foto pública requiere un perfil público',
+        );
+      const values = [nombre, email, carrera, year, estado, profile, photo];
+      if (memberId)
         await client.query(
-          `INSERT INTO public.miembro_roles (miembro_id, rol_id, estado)
-           VALUES ($1, $2, 'activo');`,
-          [memberId, roleId],
+          `UPDATE public.miembros SET nombre=$1, correo_institucional=$2, carrera=$3, anio_ingreso_carrera=$4, estado=$5, perfil_publico=$6, foto_publica=$7 WHERE id=$8`,
+          [...values, memberId],
+        );
+      else {
+        const result = await client.query(
+          `INSERT INTO public.miembros (nombre, correo_institucional, carrera, anio_ingreso_carrera, estado, perfil_publico, foto_publica) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+          values,
+        );
+        memberId = String(result.rows[0].id);
+      }
+      if (changeLevel) {
+        await client.query(
+          'UPDATE public.miembros SET rafael_access_level=$1 WHERE id=$2',
+          [nextLevel, memberId],
+        );
+        await client.query(
+          `INSERT INTO public.rafael_access_level_audit(member_id,actor_iam_subject,previous_level,next_level)
+           VALUES($1,$2,$3,$4)`,
+          [memberId, actor!.userId, previous.accessLevel ?? null, nextLevel],
         );
       }
-      for (const specialtyId of body.specialtyIds) {
+      if (body.roleIds !== undefined) {
+        const roleIds = ids(body.roleIds, 'roleIds');
+        const existing = await client.query(
+          `SELECT rol_id::text AS id FROM public.miembro_roles WHERE miembro_id=$1 AND estado='activo'`,
+          [memberId],
+        );
+        const old = new Set(existing.rows.map((row) => String(row.id)));
+        for (const roleId of roleIds.filter((value) => !old.has(value))) {
+          const role = await client.query(
+            `SELECT id FROM public.roles_club WHERE id=$1 AND estado='activo' FOR SHARE`,
+            [roleId],
+          );
+          if (!role.rows.length)
+            throw new BadRequestException(
+              'Solo puedes asignar roles activos existentes',
+            );
+          await client.query(
+            `INSERT INTO public.miembro_roles (miembro_id, rol_id) VALUES ($1,$2)`,
+            [memberId, roleId],
+          );
+        }
         await client.query(
-          `INSERT INTO public.miembro_especialidades (miembro_id, especialidad_id)
-           VALUES ($1, $2);`,
-          [memberId, specialtyId],
+          `UPDATE public.miembro_roles SET estado='inactivo', finalizado_en=clock_timestamp() WHERE miembro_id=$1 AND estado='activo' AND NOT (rol_id=ANY($2::bigint[]))`,
+          [memberId, roleIds],
         );
       }
-
-      await client.query('COMMIT');
-      return { message: 'Miembro creado correctamente', id: memberId };
-    } catch (error: any) {
-      await client.query('ROLLBACK');
-      if (error?.code === '23505') throw new ConflictException('El miembro o una de sus asignaciones ya existe');
-      if (['23503', '23514', '22P02'].includes(error?.code)) throw new BadRequestException('Los datos del miembro no son válidos');
-      throw new InternalServerErrorException('No fue posible crear el miembro');
-    } finally {
-      client.release();
-    }
-  }
-
-  private validateCreateBody(rawBody: unknown) {
-    if (!rawBody || typeof rawBody !== 'object') throw new BadRequestException('El cuerpo es obligatorio');
-    const body = rawBody as Record<string, unknown>;
-    const nombre = this.requiredText(body.nombre, 'nombre');
-    const correoInstitucional = this.requiredText(body.correoInstitucional, 'correoInstitucional').toLowerCase();
-    if (!/^[^\s@]+@utem\.cl$/i.test(correoInstitucional)) {
-      throw new BadRequestException('correoInstitucional debe pertenecer a @utem.cl');
-    }
-    const carrera = this.requiredText(body.carrera, 'carrera');
-    const anioIngresoCarrera = Number(body.anioIngresoCarrera);
-    if (!Number.isInteger(anioIngresoCarrera) || anioIngresoCarrera < 1900 || anioIngresoCarrera > 2100) {
-      throw new BadRequestException('anioIngresoCarrera no es válido');
-    }
-    const estado = body.estado ?? 'activo';
-    if (estado !== 'activo' && estado !== 'inactivo') throw new BadRequestException('estado no es válido');
-    const perfilPublico = body.perfilPublico ?? false;
-    const fotoPublica = body.fotoPublica ?? false;
-    if (typeof perfilPublico !== 'boolean' || typeof fotoPublica !== 'boolean' || (fotoPublica && !perfilPublico)) {
-      throw new BadRequestException('La configuración de visibilidad no es válida');
-    }
-    return {
-      iamSubject: body.iamSubject === undefined || body.iamSubject === null ? null : this.requiredText(body.iamSubject, 'iamSubject'),
-      nombre, correoInstitucional, carrera, anioIngresoCarrera, estado,
-      perfilPublico, fotoPublica,
-      roleIds: this.idArray(body.roleIds, 'roleIds'),
-      specialtyIds: this.idArray(body.specialtyIds, 'specialtyIds'),
-    };
-  }
-
-  private requiredText(value: unknown, field: string): string {
-    if (typeof value !== 'string' || !value.trim()) throw new BadRequestException(`${field} es obligatorio`);
-    return value.trim();
-  }
-
-  private idArray(value: unknown, field: string): number[] {
-    if (value === undefined) return [];
-    if (!Array.isArray(value)) throw new BadRequestException(`${field} debe ser un arreglo`);
-    const ids = value.map(Number);
-    if (ids.some((id) => !Number.isSafeInteger(id) || id < 1) || new Set(ids).size !== ids.length) {
-      throw new BadRequestException(`${field} contiene IDs inválidos o repetidos`);
-    }
-    return ids;
+      if (body.specialtyIds !== undefined) {
+        const specialtyIds = ids(body.specialtyIds, 'specialtyIds');
+        const existing = await client.query(
+          `SELECT especialidad_id::text AS id FROM public.miembro_especialidades WHERE miembro_id=$1`,
+          [memberId],
+        );
+        const old = new Set(existing.rows.map((row) => String(row.id)));
+        for (const specialtyId of specialtyIds.filter(
+          (value) => !old.has(value),
+        )) {
+          const specialty = await client.query(
+            `SELECT id FROM public.especialidades WHERE id=$1 AND estado='activo' FOR SHARE`,
+            [specialtyId],
+          );
+          if (!specialty.rows.length)
+            throw new BadRequestException(
+              'Solo puedes asignar especialidades activas existentes',
+            );
+          await client.query(
+            `INSERT INTO public.miembro_especialidades (miembro_id, especialidad_id) VALUES ($1,$2)`,
+            [memberId, specialtyId],
+          );
+        }
+        await client.query(
+          `DELETE FROM public.miembro_especialidades WHERE miembro_id=$1 AND NOT (especialidad_id=ANY($2::bigint[]))`,
+          [memberId, specialtyIds],
+        );
+      }
+      return { id: memberId };
+    });
   }
 
   private parseLimit(rawLimit?: string): number {
